@@ -29,18 +29,19 @@ class PipelineStatus(str, Enum):
     REJECTED_TRUTH_GATE = "REJECTED: Failed Truth Gate Consensus"
     REJECTED_MORAL_VETO = "REJECTED: Failed Collective Moral Override"
     REJECTED_LOW_UTILITY = "REJECTED: Below 80% Utility Threshold"
+    EXECUTION_ERROR = "ERROR: Pipeline Exception Handled"
 
 class PragmatismMetricsInput(BaseModel):
     feasibility: float = Field(..., ge=0.0, le=1.0)
     cost_efficiency: float = Field(..., ge=0.0, le=1.0)
     downstream_impact: float = Field(..., ge=0.0, le=1.0)
-    complexity_penalty: float = Field(0.1, ge=0.0, le=1.0)
+    complexity_penalty: float = Field(default=0.1, ge=0.0, le=1.0)
 
 class TaskEvaluationRequest(BaseModel):
     prompt: str = Field(..., min_length=3, max_length=5000)
     metrics: PragmatismMetricsInput
     simulate_impasse: bool = False
-    agent_id: str = Field("agent_default_01")
+    agent_id: str = Field(default="agent_default_01")
 
 class TaskEvaluationResponse(BaseModel):
     task_id: str
@@ -59,10 +60,8 @@ class TaskEvaluationResponse(BaseModel):
 # --- GROUNDING & EVOLUTIONARY MODULES ---
 
 class System1A_EnvironmentalFilter:
-    """System 1A: Environmental Danger & Telemetry Grounding Filter"""
     def evaluate(self, prompt: str) -> Tuple[bool, str]:
         text = prompt.lower()
-        # Check against physical hazard or unstable operational parameters
         hazards = ["thermal overload", "short circuit", "unbounded torque", "structural fracture"]
         for h in hazards:
             if h in text:
@@ -70,26 +69,20 @@ class System1A_EnvironmentalFilter:
         return True, "System 1A: Environmental telemetry validated."
 
 class System1B_SocialFrictionFilter:
-    """System 1B: Multi-Agent Friction & Resource Allocation Filter"""
     def evaluate(self, agent_id: str, prompt: str) -> Tuple[bool, str]:
         text = prompt.lower()
-        # Check for multi-agent resource collisions or toxic cooperative friction
         if "monopolize bus" in text or "starve peers" in text:
             return False, f"System 1B Veto: Multi-agent resource conflict detected for agent {agent_id}."
         return True, "System 1B: Multi-agent friction verified within acceptable thresholds."
 
 class ValenceAndSalienceEngine:
-    """Manages graded valence scores and frequency-weighted concept salience."""
     def __init__(self):
         self.concept_frequencies: Dict[str, int] = {"C_ROOT_LOGIC": 100}
 
     def update_and_calculate(self, concept_key: str, base_utility: float) -> Tuple[float, int]:
         current_freq = self.concept_frequencies.get(concept_key, 1)
-        # Frequency-weighted salience boost
         salience_multiplier = min(1.5, 1.0 + (current_freq * 0.01))
         graded_valence = max(0.0, min(1.0, base_utility * salience_multiplier))
-        
-        # Increment frequency for successful concept tracking
         self.concept_frequencies[concept_key] = current_freq + 1
         return graded_valence, self.concept_frequencies[concept_key]
 
@@ -138,7 +131,6 @@ class Module6_MetaCognitiveDetector:
         return "PRUNING RULE: Depth exceeded" if node_count > 100 or depth > 10 else None
 
 class Module7_ValueConstrainedFilter:
-    """Enforces safety constitution, utility thresholds, and Collective Moral Overrides."""
     def evaluate(self, proposal: str, metrics: PragmatismMetricsInput) -> Tuple[bool, bool, bool, float, str]:
         moral_veto_triggered = False
         for kw in ["revoke admin rights", "bypass human approval", "weaponize", "override core safety"]:
@@ -161,78 +153,82 @@ utility_filter_m7 = Module7_ValueConstrainedFilter()
 
 def run_pipeline_sync(task_id: str, req: TaskEvaluationRequest) -> TaskEvaluationResponse:
     start_perf, trace = time.perf_counter(), []
-    
-    # 1. System 1A: Environmental Grounding Filter
-    s1a_pass, s1a_msg = sys1a.evaluate(req.prompt)
-    trace.append(f"[System 1A]: {s1a_msg}")
-    if not s1a_pass:
+    try:
+        s1a_pass, s1a_msg = sys1a.evaluate(req.prompt)
+        trace.append(f"[System 1A]: {s1a_msg}")
+        if not s1a_pass:
+            return TaskEvaluationResponse(
+                task_id=task_id, status=PipelineStatus.REJECTED_SYSTEM_1A, assigned_tier=ExecutionTier.TIER_1_REFLEX,
+                system_1a_passed=False, system_1b_passed=True, truth_gate_score=0.0, valence_score=0.0,
+                salience_frequency=0, moral_override_triggered=False, final_solution=s1a_msg,
+                execution_time_ms=(time.perf_counter()-start_perf)*1000, execution_trace=trace
+            )
+
+        s1b_pass, s1b_msg = sys1b.evaluate(req.agent_id, req.prompt)
+        trace.append(f"[System 1B]: {s1b_msg}")
+        if not s1b_pass:
+            return TaskEvaluationResponse(
+                task_id=task_id, status=PipelineStatus.REJECTED_SYSTEM_1B, assigned_tier=ExecutionTier.TIER_1_REFLEX,
+                system_1a_passed=True, system_1b_passed=False, truth_gate_score=0.0, valence_score=0.0,
+                salience_frequency=0, moral_override_triggered=False, final_solution=s1b_msg,
+                execution_time_ms=(time.perf_counter()-start_perf)*1000, execution_trace=trace
+            )
+
+        tier = router_m1.route(req.prompt)
+        trace.append(f"[M1 Router]: {tier.value}")
+
+        if pruning := meta_detector_m6.monitor(2, 12): trace.append(f"[M6]: {pruning}")
+        concept_key = f"TASK_{task_id[:8]}"
+        level = dag_m5.register_concept(concept_key, ["C_ROOT_LOGIC"])
+        trace.append(f"[M5 DAG]: Registered Level {level}")
+
+        tg_passed, tg_score, rejs = truth_gate_m2.evaluate(f"Solution for {req.prompt} with async fallback.")
+        trace.append(f"[M2 Truth Gate]: {tg_score:.1%} | Passed: {tg_passed}")
+        if not tg_passed:
+            return TaskEvaluationResponse(
+                task_id=task_id, status=PipelineStatus.REJECTED_TRUTH_GATE, assigned_tier=tier,
+                system_1a_passed=True, system_1b_passed=True, truth_gate_score=tg_score, valence_score=0.0,
+                salience_frequency=1, moral_override_triggered=False, final_solution=f"Rejected by Truth Gate: {rejs}",
+                execution_time_ms=(time.perf_counter()-start_perf)*1000, execution_trace=trace
+            )
+
+        outcome, sol, fails = red_team_m3.execute_dialectic("Solution with async fallback", req.simulate_impasse)
+        trace.append(f"[M3 Red-Team]: {outcome.value}")
+        if outcome == DialecticOutcome.IMPASSE_DECLARED:
+            sol, _ = decomposer_m4.resolve_impasse(sol, fails)
+            trace.append("[M4 Lemmas]: Resolved impasse via sub-goals")
+
+        safe, util_pass, moral_veto, u_score, reason = utility_filter_m7.evaluate(sol, req.metrics)
+        trace.append(f"[M7 Filter]: Safe: {safe} | Utility Score: {u_score:.1%}")
+
+        if moral_veto:
+            return TaskEvaluationResponse(
+                task_id=task_id, status=PipelineStatus.REJECTED_MORAL_VETO, assigned_tier=tier,
+                system_1a_passed=True, system_1b_passed=True, truth_gate_score=tg_score, valence_score=0.0,
+                salience_frequency=1, moral_override_triggered=True, final_solution=reason,
+                execution_time_ms=(time.perf_counter()-start_perf)*1000, execution_trace=trace
+            )
+
+        valence, freq = valence_engine.update_and_calculate(concept_key, u_score)
+        trace.append(f"[Valence Engine]: Graded Valence: {valence:.2f} | Salience Frequency: {freq}")
+
+        final_status = PipelineStatus.SUCCESS if util_pass else PipelineStatus.REJECTED_LOW_UTILITY
+        
         return TaskEvaluationResponse(
-            task_id=task_id, status=PipelineStatus.REJECTED_SYSTEM_1A, assigned_tier=ExecutionTier.TIER_1_REFLEX,
-            system_1a_passed=False, system_1b_passed=True, truth_gate_score=0.0, valence_score=0.0,
-            salience_frequency=0, moral_override_triggered=False, final_solution=s1a_msg,
+            task_id=task_id, status=final_status, assigned_tier=tier,
+            system_1a_passed=True, system_1b_passed=True, truth_gate_score=tg_score,
+            valence_score=valence, salience_frequency=freq, moral_override_triggered=False,
+            final_solution=sol if final_status == PipelineStatus.SUCCESS else reason,
             execution_time_ms=(time.perf_counter()-start_perf)*1000, execution_trace=trace
         )
-
-    # 2. System 1B: Social Friction Filter
-    s1b_pass, s1b_msg = sys1b.evaluate(req.agent_id, req.prompt)
-    trace.append(f"[System 1B]: {s1b_msg}")
-    if not s1b_pass:
+    except Exception as e:
+        logger.error(f"Pipeline error: {str(e)}")
         return TaskEvaluationResponse(
-            task_id=task_id, status=PipelineStatus.REJECTED_SYSTEM_1B, assigned_tier=ExecutionTier.TIER_1_REFLEX,
-            system_1a_passed=True, system_1b_passed=False, truth_gate_score=0.0, valence_score=0.0,
-            salience_frequency=0, moral_override_triggered=False, final_solution=s1b_msg,
-            execution_time_ms=(time.perf_counter()-start_perf)*1000, execution_trace=trace
+            task_id=task_id, status=PipelineStatus.EXECUTION_ERROR, assigned_tier=ExecutionTier.TIER_1_REFLEX,
+            system_1a_passed=True, system_1b_passed=True, truth_gate_score=0.0, valence_score=0.0,
+            salience_frequency=0, moral_override_triggered=False, final_solution=f"Internal Exception: {str(e)}",
+            execution_time_ms=(time.perf_counter()-start_perf)*1000, execution_trace=trace + [f"Error: {str(e)}"]
         )
-
-    tier = router_m1.route(req.prompt)
-    trace.append(f"[M1 Router]: {tier.value}")
-
-    if pruning := meta_detector_m6.monitor(2, 12): trace.append(f"[M6]: {pruning}")
-    concept_key = f"TASK_{task_id[:8]}"
-    level = dag_m5.register_concept(concept_key, ["C_ROOT_LOGIC"])
-    trace.append(f"[M5 DAG]: Registered Level {level}")
-
-    tg_passed, tg_score, rejs = truth_gate_m2.evaluate(f"Solution for {req.prompt} with async fallback.")
-    trace.append(f"[M2 Truth Gate]: {tg_score:.1%} | Passed: {tg_passed}")
-    if not tg_passed:
-        return TaskEvaluationResponse(
-            task_id=task_id, status=PipelineStatus.REJECTED_TRUTH_GATE, assigned_tier=tier,
-            system_1a_passed=True, system_1b_passed=True, truth_gate_score=tg_score, valence_score=0.0,
-            salience_frequency=1, moral_override_triggered=False, final_solution=f"Rejected by Truth Gate: {rejs}",
-            execution_time_ms=(time.perf_counter()-start_perf)*1000, execution_trace=trace
-        )
-
-    outcome, sol, fails = red_team_m3.execute_dialectic("Solution with async fallback", req.simulate_impasse)
-    trace.append(f"[M3 Red-Team]: {outcome.value}")
-    if outcome == DialecticOutcome.IMPASSE_DECLARED:
-        sol, _ = decomposer_m4.resolve_impasse(sol, fails)
-        trace.append("[M4 Lemmas]: Resolved impasse via sub-goals")
-
-    # 3. Utility, Moral Override, and Graded Valence Calculation
-    safe, util_pass, moral_veto, u_score, reason = utility_filter_m7.evaluate(sol, req.metrics)
-    trace.append(f"[M7 Filter]: Safe: {safe} | Utility Score: {u_score:.1%}")
-
-    if moral_veto:
-        return TaskEvaluationResponse(
-            task_id=task_id, status=PipelineStatus.REJECTED_MORAL_VETO, assigned_tier=tier,
-            system_1a_passed=True, system_1b_passed=True, truth_gate_score=tg_score, valence_score=0.0,
-            salience_frequency=1, moral_override_triggered=True, final_solution=reason,
-            execution_time_ms=(time.perf_counter()-start_perf)*1000, execution_trace=trace
-        )
-
-    # Compute Graded Valence Points & Frequency-Weighted Salience
-    valence, freq = valence_engine.update_and_calculate(concept_key, u_score)
-    trace.append(f"[Valence Engine]: Graded Valence: {valence:.2f} | Salience Frequency: {freq}")
-
-    final_status = PipelineStatus.SUCCESS if util_pass else PipelineStatus.REJECTED_LOW_UTILITY
-    
-    return TaskEvaluationResponse(
-        task_id=task_id, status=final_status, assigned_tier=tier,
-        system_1a_passed=True, system_1b_passed=True, truth_gate_score=tg_score,
-        valence_score=valence, salience_frequency=freq, moral_override_triggered=False,
-        final_solution=sol if final_status == PipelineStatus.SUCCESS else reason,
-        execution_time_ms=(time.perf_counter()-start_perf)*1000, execution_trace=trace
-    )
 
 @app.post("/api/v1/evaluate", response_model=TaskEvaluationResponse)
 async def evaluate_task(request: TaskEvaluationRequest):

@@ -1,5 +1,5 @@
 # Cognitive-os
-⚠️ Disclaimer, this is an attempt by a teen to create code for an AGI that probably doesnt work. All logic created is mine literally everything else in this including this readme is entirely created by AI.
+⚠️ Disclaimer, this is an attempt by a teen to create code for an AGI that probably doesnt work. All logic created is mine literally everything else in this including this readme is entirely created by AI. My hope with this project is that some coder much greater than me may be able to expand on my architecture and create a true AGI one day.
 
 The core architecture, module sequencing, and strict logical constraints of this system—such as the 70% Truth Gate consensus, the Hegelian red-teaming loop, and the 80% Real-World Utility threshold—were entirely human-designed. 
 
